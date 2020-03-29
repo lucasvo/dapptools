@@ -1,6 +1,6 @@
 {-# Language TemplateHaskell #-}
 {-# Language ImplicitParams #-}
-
+{-# Language DataKinds #-}
 module EVM.TTY where
 
 import Prelude hiding (Word)
@@ -48,6 +48,7 @@ import Data.Text.Encoding (decodeUtf8)
 import Data.List (sort)
 import Data.Version (showVersion)
 import Numeric (showHex)
+import Data.SBV
 
 import qualified Data.ByteString as BS
 import qualified Data.Map as Map
@@ -77,7 +78,7 @@ type UiWidget = Widget Name
 data UiVmState = UiVmState
   { _uiVm             :: VM
   , _uiVmNextStep     :: Stepper ()
-  , _uiVmStackList    :: List Name (Int, Word)
+  , _uiVmStackList    :: List Name (Int, (SWord 256))
   , _uiVmBytecodeList :: List Name (Int, Op)
   , _uiVmTraceList    :: List Name Text
   , _uiVmSolidityList :: List Name (Int, ByteString)
@@ -283,8 +284,8 @@ runFromVM vm = do
            , _uiVmTestOpts = opts
            }
     ui1 = updateUiVmState ui0 vm & set uiVmFirstState ui1
-
-  ui2 <- customMain mkVty Nothing (app opts) (ViewVm ui1)
+  v <- mkVty
+  ui2 <- customMain v mkVty Nothing (app opts) (ViewVm ui1)
   case ui2 of
     ViewVm ui -> return (view uiVm ui)
     _ -> error "internal error: customMain returned prematurely"
@@ -320,8 +321,8 @@ main opts root jsonFilePath = do
             , _testPickerDapp = dapp
             , _testOpts = opts
             }
-
-        _ <- customMain mkVty Nothing (app opts) (ui :: UiState)
+        v <- mkVty
+        _ <- customMain v mkVty Nothing (app opts) (ui :: UiState)
         return ()
 
 -- ^ Specifies whether to do I/O blocking or VM halting while stepping.
@@ -876,14 +877,21 @@ drawStackPane ui =
     labelText = txt ("Gas available: " <> gasText <> "; stack:")
   in hBorderWithLabel labelText <=>
     renderList
-      (\_ (i, x@(C _ w)) ->
+      (\_ (i, x) ->
          vBox
            [ withHighlight True (str ("#" ++ show i ++ " "))
                <+> str (show x)
-           , dim (txt ("   " <> showWordExplanation w (view uiVmDapp ui)))
+           , dim (txt ("   " <> case unliteral x of
+                       Nothing -> ""
+                       Just u -> showWordExplanation (fromSizzle u) (view uiVmDapp ui)))
            ])
       False
       (view uiVmStackList ui)
+
+showSWordExplanation :: (SWord 256) -> Maybe DappInfo -> Text
+showSWordExplanation w d = case unliteral w of
+  Nothing -> pack $ show w
+  Just c  -> showWordExplanation (fromSizzle c) d
 
 showWordExplanation :: W256 -> Maybe DappInfo -> Text
 showWordExplanation w Nothing = showDec Unsigned w
@@ -919,7 +927,8 @@ drawTracePane s =
   case view uiVmShowMemory s of
     True ->
       hBorderWithLabel (txt "Calldata")
-      <=> str (prettyHex 40 (view (uiVm . state . calldata) s))
+--      <=> str (prettyHex 40 (view (uiVm . state . calldata) s))
+      <=> str (show (view (uiVm . state . calldata) s))
       <=> hBorderWithLabel (txt "Returndata")
       <=> str (prettyHex 40 (view (uiVm . state . returndata) s))
       <=> hBorderWithLabel (txt "Memory")

@@ -45,7 +45,7 @@ import qualified EVM.Facts     as Facts
 import qualified EVM.Facts.Git as Git
 import qualified EVM.UnitTest  as EVM.UnitTest
 
-import Control.Concurrent.Async   (async, waitCatch)
+--import Control.Concurrent.Async   (async, waitCatch)
 import Control.Exception          (evaluate)
 import Control.Lens
 import Control.Applicative
@@ -57,6 +57,7 @@ import Data.Text                  (Text, unpack, pack)
 import Data.Text.Encoding         (encodeUtf8)
 import Data.Maybe                 (fromMaybe)
 import Data.Version               (showVersion)
+import Data.SBV hiding (Word, verbose)
 import System.Directory           (withCurrentDirectory, listDirectory)
 import System.Exit                (die, exitFailure)
 import System.IO                  (hFlush, stdout)
@@ -75,14 +76,16 @@ import qualified Data.Sequence          as Seq
 import qualified System.Timeout         as Timeout
 
 import qualified Paths_hevm      as Paths
-import qualified Text.Regex.TDFA as Regex
+--import qualified Text.Regex.TDFA as Regex
 
 import Options.Generic as Options
 
 -- This record defines the program's command-line options
 -- automatically via the `optparse-generic` package.
 data Command w
-  = Exec -- Execute a given program with specified env & calldata
+  = Symbolic -- Execute a given program with specified env & calldata
+        { code        :: w ::: ByteString       <?> "Program bytecode"}
+  | Exec -- Execute a given program with specified env & calldata
       { code        :: w ::: ByteString       <?> "Program bytecode"
       , calldata    :: w ::: Maybe ByteString <?> "Tx: calldata"
       , address     :: w ::: Maybe Addr       <?> "Tx: address"
@@ -215,6 +218,7 @@ main = do
     root = fromMaybe "." (dappRoot cmd)
   case cmd of
     Version {} -> putStrLn (showVersion Paths.version)
+    Symbolic {} -> launchSymbolic cmd
     Exec {} ->
       launchExec cmd
     VmTest {} ->
@@ -296,57 +300,89 @@ findJsonFile Nothing = do
         ]
 
 dappTest :: UnitTestOptions -> Mode -> String -> IO ()
-dappTest opts _ solcFile = do
-  readSolc solcFile >>=
-    \case
-      Just (contractMap, cache) -> do
-        let matcher = regexMatches (EVM.UnitTest.match opts)
-        let unitTests = (findUnitTests matcher) (Map.elems contractMap)
-        results <- mapM (runUnitTestContract opts contractMap cache) unitTests
-        when (any (== False) results) exitFailure
-      Nothing ->
-        error ("Failed to read Solidity JSON for `" ++ solcFile ++ "'")
+dappTest = error "" -- :: UnitTestOptions -> Mode -> String -> IO ()
+-- dappTest opts _ solcFile = do
+--   readSolc solcFile >>=
+--     \case
+--       Just (contractMap, cache) -> do
+--         let matcher = regexMatches (EVM.UnitTest.match opts)
+--         let unitTests = (findUnitTests matcher) (Map.elems contractMap)
+--         results <- mapM (runUnitTestContract opts contractMap cache) unitTests
+--         when (any (== False) results) exitFailure
+--       Nothing ->
+--         error ("Failed to read Solidity JSON for `" ++ solcFile ++ "'")
 
-regexMatches :: Text -> Text -> Bool
-regexMatches regexSource =
-  let
-    compOpts =
-      Regex.defaultCompOpt { Regex.lastStarGreedy = True }
-    execOpts =
-      Regex.defaultExecOpt { Regex.captureGroups = False }
-    regex = Regex.makeRegexOpts compOpts execOpts (unpack regexSource)
-  in
-    Regex.matchTest regex . Seq.fromList . unpack
+-- regexMatches :: Text -> Text -> Bool
+-- regexMatches regexSource =
+--   let
+--     compOpts =
+--       Regex.defaultCompOpt { Regex.lastStarGreedy = True }
+--     execOpts =
+--       Regex.defaultExecOpt { Regex.captureGroups = False }
+--     regex = Regex.makeRegexOpts compOpts execOpts (unpack regexSource)
+--   in
+--     Regex.matchTest regex . Seq.fromList . unpack
+
+symbolEVM :: Symbolic (SWord 256, SWord 256)
+symbolEVM = do x <- symbolic "x"
+               y <- symbolic "y"
+               pure (x,y)
+
+
+launchSymbolic :: Command Options.Unwrapped -> IO ()
+launchSymbolic cmd = do (x,y) <- runSMT symbolEVM
+                        let vm1 = EVM.makeVm $ EVM.VMOpts
+                              {   EVM.vmoptCode         = hexByteString "--code" (strip0x (code cmd))
+                              , EVM.vmoptCalldata      = toBytes y <> toBytes x
+                              , EVM.vmoptValue         = 0
+                              , EVM.vmoptAddress       = 0
+                              , EVM.vmoptCaller        = 0
+                              , EVM.vmoptOrigin        = 0
+                              , EVM.vmoptGas           = 230012300123
+                              , EVM.vmoptGaslimit      = 230012300123
+                              , EVM.vmoptCoinbase      = 0
+                              , EVM.vmoptNumber        = 0
+                              , EVM.vmoptTimestamp     = 0
+                              , EVM.vmoptBlockGaslimit = 0
+                              , EVM.vmoptGasprice      = 0
+                              , EVM.vmoptMaxCodeSize   = 0xffffffff
+                              , EVM.vmoptDifficulty    = 0
+                              , EVM.vmoptSchedule      = FeeSchedule.istanbul
+                              , EVM.vmoptCreate        = False --create cmd
+                              }
+                        void (EVM.TTY.runFromVM vm1)
 
 dappCoverage :: UnitTestOptions -> Mode -> String -> IO ()
-dappCoverage opts _ solcFile = do
-  readSolc solcFile >>=
-    \case
-      Just (contractMap, cache) -> do
-        let matcher = regexMatches (EVM.UnitTest.match opts)
-        let unitTests = (findUnitTests matcher) (Map.elems contractMap)
-        covs <- mconcat <$> mapM (coverageForUnitTestContract opts contractMap cache) unitTests
+dappCoverage = error ""
+-- dappCoverage :: UnitTestOptions -> Mode -> String -> IO ()
+-- dappCoverage opts _ solcFile = do
+--   readSolc solcFile >>=
+--     \case
+--       Just (contractMap, cache) -> do
+--         let matcher = regexMatches (EVM.UnitTest.match opts)
+--         let unitTests = (findUnitTests matcher) (Map.elems contractMap)
+--         covs <- mconcat <$> mapM (coverageForUnitTestContract opts contractMap cache) unitTests
 
-        let
-          dapp = dappInfo "." contractMap cache
-          f (k, vs) = do
-            putStr "***** hevm coverage for "
-            putStrLn (unpack k)
-            putStrLn ""
-            forM_ vs $ \(n, bs) -> do
-              case ByteString.find (\x -> x /= 0x9 && x /= 0x20 && x /= 0x7d) bs of
-                Nothing -> putStr "..... "
-                Just _ ->
-                  case n of
-                    -1 -> putStr ";;;;; "
-                    0  -> putStr "##### "
-                    _  -> putStr "      "
-              Char8.putStrLn bs
-            putStrLn ""
+--         let
+--           dapp = dappInfo "." contractMap cache
+--           f (k, vs) = do
+--             putStr "***** hevm coverage for "
+--             putStrLn (unpack k)
+--             putStrLn ""
+--             forM_ vs $ \(n, bs) -> do
+--               case ByteString.find (\x -> x /= 0x9 && x /= 0x20 && x /= 0x7d) bs of
+--                 Nothing -> putStr "..... "
+--                 Just _ ->
+--                   case n of
+--                     -1 -> putStr ";;;;; "
+--                     0  -> putStr "##### "
+--                     _  -> putStr "      "
+--               Char8.putStrLn bs
+--             putStrLn ""
 
-        mapM_ f (Map.toList (coverageReport dapp covs))
-      Nothing ->
-        error ("Failed to read Solidity JSON for `" ++ solcFile ++ "'")
+--         mapM_ f (Map.toList (coverageReport dapp covs))
+--       Nothing ->
+--         error ("Failed to read Solidity JSON for `" ++ solcFile ++ "'")
 
 launchExec :: Command Options.Unwrapped -> IO ()
 launchExec cmd = do
@@ -446,7 +482,7 @@ vmFromCommand cmd =
 
     vm1 = EVM.makeVm $ EVM.VMOpts
       { EVM.vmoptCode          = hexByteString "--code" (strip0x (code cmd))
-      , EVM.vmoptCalldata      = maybe "" (hexByteString "--calldata" . strip0x)
+      , EVM.vmoptCalldata      = maybe [] (litBytes . (hexByteString "--calldata") . strip0x)
                                    (calldata cmd)
       , EVM.vmoptValue         = value'
       , EVM.vmoptAddress       = address'
@@ -492,31 +528,32 @@ launchTest execmode cmd = do
 
 #if MIN_VERSION_aeson(1, 0, 0)
 runVMTest :: Bool -> ExecMode -> Mode -> Maybe Int -> (String, VMTest.Case) -> IO Bool
-runVMTest diffmode execmode mode timelimit (name, x) = do
-  let vm0 = VMTest.vmForCase execmode x
-  putStr (name ++ " ")
-  hFlush stdout
-  result <- do
-    action <- async $
-      case mode of
-        Run ->
-          Timeout.timeout (1e6 * (fromMaybe 10 timelimit)) . evaluate $ do
-            execState (VMTest.interpret . void $ EVM.Stepper.execFully) vm0
-        Debug ->
-          Just <$> EVM.TTY.runFromVM vm0
-    waitCatch action
-  case result of
-    Right (Just vm1) -> do
-      ok <- VMTest.checkExpectation diffmode execmode x vm1
-      putStrLn (if ok then "ok" else "")
-      return ok
-    Right Nothing -> do
-      putStrLn "timeout"
-      return False
-    Left e -> do
-      putStrLn $ "error: " ++ if diffmode
-        then show e
-        else (head . lines . show) e
-      return False
+runVMTest = error "hmm"
+-- runVMTest diffmode execmode mode timelimit (name, x) = do
+--   let vm0 = VMTest.vmForCase execmode x
+--   putStr (name ++ " ")
+--   hFlush stdout
+--   result <- do
+--     action <- async $
+--       case mode of
+--         Run ->
+--           Timeout.timeout (1e6 * (fromMaybe 10 timelimit)) . evaluate $ do
+--             execState (VMTest.interpret . void $ EVM.Stepper.execFully) vm0
+--         Debug ->
+--           Just <$> EVM.TTY.runFromVM vm0
+--     waitCatch action
+--   case result of
+--     Right (Just vm1) -> do
+--       ok <- VMTest.checkExpectation diffmode execmode x vm1
+--       putStrLn (if ok then "ok" else "")
+--       return ok
+--     Right Nothing -> do
+--       putStrLn "timeout"
+--       return False
+--     Left e -> do
+--       putStrLn $ "error: " ++ if diffmode
+--         then show e
+--         else (head . lines . show) e
+--       return False
 
 #endif
