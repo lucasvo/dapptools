@@ -64,6 +64,7 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.Vector        (Vector)
 import Data.Word          (Word32, Word8)
 import Data.List          (intercalate)
+import Data.SBV hiding (label)
 import GHC.Generics
 
 import Test.QuickCheck hiding ((.&.), label)
@@ -468,3 +469,11 @@ instance Arbitrary AbiValue where
             (shrinkList shrink (Vector.toList v))
     AbiTuple v -> Vector.toList $ AbiTuple . Vector.fromList . shrink <$> v
     _ -> []
+
+--instance SymVal AbiValue where
+  -- mkSymVal a = _
+  -- -- | Turn a literal constant to symbolic
+  -- literal a = _ 
+  -- -- | Extract a literal, from a CV representation
+  -- fromCV a = _ -- CV -> a
+
