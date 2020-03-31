@@ -17,6 +17,15 @@ in self-hs: super-hs:
     restless-git = dontCheck (import ./src/restless-git);
     wreq = pkgs.haskell.lib.doJailbreak super-hs.wreq;
 
+    # This package is falsely marked as broken in nixpkgs 19.09
+    # and needs z3 to work
+    sbv_8_4 = super-hs.sbv_8_4.overrideAttrs (attrs: {
+      meta.broken = false;
+      postPatch = ''
+      sed -i -e 's|"z3"|"${pkgs.z3}/bin/z3"|' Data/SBV/Provers/Z3.hs'';
+    });
+
+
     # This package is somewhat unmaintained and doesn't compile with GHC 8.4,
     # so we have to use a GitHub fork that fixes it.
     semver-range = super-hs.semver-range.overrideAttrs (attrs: {
@@ -45,7 +54,7 @@ in self-hs: super-hs:
       '';
 
       enableSeparateDataOutput = true;
-      buildInputs = attrs.buildInputs ++ [pkgs.solc];
+      buildInputs = attrs.buildInputs ++ [pkgs.solc pkgs.z3];
       nativeBuildInputs = attrs.nativeBuildInputs ++ [pkgs.makeWrapper];
     }));
   }
