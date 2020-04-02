@@ -29,6 +29,7 @@ import qualified EVM.VMTest as VMTest
 
 import EVM (ExecMode(..))
 import EVM.Concrete (createAddress)
+import EVM.Symbolic
 import EVM.Debug
 import EVM.Exec
 import EVM.Solidity
@@ -58,6 +59,7 @@ import Data.Text.Encoding         (encodeUtf8)
 import Data.Maybe                 (fromMaybe)
 import Data.Version               (showVersion)
 import Data.SBV hiding (Word, verbose)
+import Data.SBV.Control hiding (Word, verbose, Version, timeout, create)
 import System.Directory           (withCurrentDirectory, listDirectory)
 import System.Exit                (die, exitFailure)
 import System.IO                  (hFlush, stdout)
@@ -84,7 +86,9 @@ import Options.Generic as Options
 -- automatically via the `optparse-generic` package.
 data Command w
   = Symbolic -- Execute a given program with specified env & calldata
-        { code        :: w ::: ByteString       <?> "Program bytecode"}
+      { code          :: w ::: ByteString                <?> "Program bytecode"
+      , funcSig       :: w ::: Text                      <?> "Function signature"
+      }
   | Exec -- Execute a given program with specified env & calldata
       { code        :: w ::: ByteString       <?> "Program bytecode"
       , calldata    :: w ::: Maybe ByteString <?> "Tx: calldata"
@@ -300,46 +304,40 @@ findJsonFile Nothing = do
         ]
 
 dappTest :: UnitTestOptions -> Mode -> String -> IO ()
-dappTest = error "" -- :: UnitTestOptions -> Mode -> String -> IO ()
--- dappTest opts _ solcFile = do
---   readSolc solcFile >>=
---     \case
---       Just (contractMap, cache) -> do
---         let matcher = regexMatches (EVM.UnitTest.match opts)
---         let unitTests = (findUnitTests matcher) (Map.elems contractMap)
---         results <- mapM (runUnitTestContract opts contractMap cache) unitTests
---         when (any (== False) results) exitFailure
---       Nothing ->
---         error ("Failed to read Solidity JSON for `" ++ solcFile ++ "'")
+dappTest opts _ solcFile = do
+  readSolc solcFile >>=
+    \case
+      Just (contractMap, cache) -> do
+        let matcher = regexMatches (EVM.UnitTest.match opts)
+        let unitTests = (findUnitTests matcher) (Map.elems contractMap)
+        results <- mapM (runUnitTestContract opts contractMap cache) unitTests
+        when (any (== False) results) exitFailure
+      Nothing ->
+        error ("Failed to read Solidity JSON for `" ++ solcFile ++ "'")
 
--- regexMatches :: Text -> Text -> Bool
--- regexMatches regexSource =
---   let
---     compOpts =
---       Regex.defaultCompOpt { Regex.lastStarGreedy = True }
---     execOpts =
---       Regex.defaultExecOpt { Regex.captureGroups = False }
---     regex = Regex.makeRegexOpts compOpts execOpts (unpack regexSource)
---   in
---     Regex.matchTest regex . Seq.fromList . unpack
+regexMatches :: Text -> Text -> Bool
+regexMatches x y = True
+  -- regexMatches regexSource =
+  -- let
+  --   compOpts =
+  --     Regex.defaultCompOpt { Regex.lastStarGreedy = True }
+  --   execOpts =
+  --     Regex.defaultExecOpt { Regex.captureGroups = False }
+  --   regex = Regex.makeRegexOpts compOpts execOpts (unpack regexSource)
+  -- in
+  --   Regex.matchTest regex . Seq.fromList . unpack
 
-symbolEVM :: Symbolic (SWord 256, SWord 256)
-symbolEVM = do x <- symbolic "x"
-               y <- symbolic "y"
-               pure (x,y)
-
-
-launchSymbolic :: Command Options.Unwrapped -> IO ThmResult
-launchSymbolic cmd = prove $ \x y ->
-                        let vm1 = EVM.makeVm $ EVM.VMOpts
-                              {   EVM.vmoptCode         = hexByteString "--code" (strip0x (code cmd))
-                              , EVM.vmoptCalldata      = toBytes y <> toBytes x
+launchSymbolic :: Command Options.Unwrapped -> IO ()
+launchSymbolic cmd = let sigNature = parseMethodInput (funcSig cmd)
+                         vm1 = EVM.makeVm $ EVM.VMOpts
+                              { EVM.vmoptCode          = hexByteString "--code" (strip0x (code cmd))
+                              , EVM.vmoptCalldata      = []
                               , EVM.vmoptValue         = 0
                               , EVM.vmoptAddress       = 0
                               , EVM.vmoptCaller        = 0
                               , EVM.vmoptOrigin        = 0
-                              , EVM.vmoptGas           = 230012300123
-                              , EVM.vmoptGaslimit      = 230012300123
+                              , EVM.vmoptGas           = 0xffffffffff
+                              , EVM.vmoptGaslimit      = 0xffffffffff
                               , EVM.vmoptCoinbase      = 0
                               , EVM.vmoptNumber        = 0
                               , EVM.vmoptTimestamp     = 0
@@ -348,51 +346,45 @@ launchSymbolic cmd = prove $ \x y ->
                               , EVM.vmoptMaxCodeSize   = 0xffffffff
                               , EVM.vmoptDifficulty    = 0
                               , EVM.vmoptSchedule      = FeeSchedule.istanbul
-                              , EVM.vmoptCreate        = False --create cmd
+                              , EVM.vmoptCreate        = False
                               }
-                            postvm = execState exec vm1
-                        in case view EVM.result postvm of
-                              Nothing ->
-                                sFalse --error "internal error; no EVM result"
-                              Just (EVM.VMFailure (EVM.Revert msg)) -> do
-                                sFalse --die . show . ByteStringS $ msg
-                              Just (EVM.VMFailure err) -> do
-                                sFalse --die . show $ err
-                              Just (EVM.VMSuccess msg) -> do
-                                x + (y :: SWord 256) .== (fromBytes msg)
---                                print res
+                     in do results <- runSMT $ query $ startWithArgs vm1 sigNature (const sTrue) Nothing
+                           mapM (\x -> case x of
+                                       (EVM.VMFailure (EVM.UnrecognizedOpcode 254)) -> print "Assertion violation for a path!"
+                                       _ -> pure ()
+                                ) results
+                           print "All ending states:"
+                           print results
 
 dappCoverage :: UnitTestOptions -> Mode -> String -> IO ()
-dappCoverage = error ""
--- dappCoverage :: UnitTestOptions -> Mode -> String -> IO ()
--- dappCoverage opts _ solcFile = do
---   readSolc solcFile >>=
---     \case
---       Just (contractMap, cache) -> do
---         let matcher = regexMatches (EVM.UnitTest.match opts)
---         let unitTests = (findUnitTests matcher) (Map.elems contractMap)
---         covs <- mconcat <$> mapM (coverageForUnitTestContract opts contractMap cache) unitTests
+dappCoverage opts _ solcFile = do
+  readSolc solcFile >>=
+    \case
+      Just (contractMap, cache) -> do
+        let matcher = regexMatches (EVM.UnitTest.match opts)
+        let unitTests = (findUnitTests matcher) (Map.elems contractMap)
+        covs <- mconcat <$> mapM (coverageForUnitTestContract opts contractMap cache) unitTests
 
---         let
---           dapp = dappInfo "." contractMap cache
---           f (k, vs) = do
---             putStr "***** hevm coverage for "
---             putStrLn (unpack k)
---             putStrLn ""
---             forM_ vs $ \(n, bs) -> do
---               case ByteString.find (\x -> x /= 0x9 && x /= 0x20 && x /= 0x7d) bs of
---                 Nothing -> putStr "..... "
---                 Just _ ->
---                   case n of
---                     -1 -> putStr ";;;;; "
---                     0  -> putStr "##### "
---                     _  -> putStr "      "
---               Char8.putStrLn bs
---             putStrLn ""
+        let
+          dapp = dappInfo "." contractMap cache
+          f (k, vs) = do
+            putStr "***** hevm coverage for "
+            putStrLn (unpack k)
+            putStrLn ""
+            forM_ vs $ \(n, bs) -> do
+              case ByteString.find (\x -> x /= 0x9 && x /= 0x20 && x /= 0x7d) bs of
+                Nothing -> putStr "..... "
+                Just _ ->
+                  case n of
+                    -1 -> putStr ";;;;; "
+                    0  -> putStr "##### "
+                    _  -> putStr "      "
+              Char8.putStrLn bs
+            putStrLn ""
 
---         mapM_ f (Map.toList (coverageReport dapp covs))
---       Nothing ->
---         error ("Failed to read Solidity JSON for `" ++ solcFile ++ "'")
+        mapM_ f (Map.toList (coverageReport dapp covs))
+      Nothing ->
+        error ("Failed to read Solidity JSON for `" ++ solcFile ++ "'")
 
 launchExec :: Command Options.Unwrapped -> IO ()
 launchExec cmd = do
@@ -538,7 +530,7 @@ launchTest execmode cmd = do
 
 #if MIN_VERSION_aeson(1, 0, 0)
 runVMTest :: Bool -> ExecMode -> Mode -> Maybe Int -> (String, VMTest.Case) -> IO Bool
-runVMTest = error "hmm"
+runVMTest = error "nononoo"
 -- runVMTest diffmode execmode mode timelimit (name, x) = do
 --   let vm0 = VMTest.vmForCase execmode x
 --   putStr (name ++ " ")
