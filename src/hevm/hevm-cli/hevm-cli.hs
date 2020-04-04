@@ -85,7 +85,7 @@ import Options.Generic as Options
 -- This record defines the program's command-line options
 -- automatically via the `optparse-generic` package.
 data Command w
-  = Symbolic -- Execute a given program with specified env & calldata
+  = Assert -- Execute a given program with specified env & calldata
       { code          :: w ::: ByteString                <?> "Program bytecode"
       , funcSig       :: w ::: Text                      <?> "Function signature"
       }
@@ -222,7 +222,7 @@ main = do
     root = fromMaybe "." (dappRoot cmd)
   case cmd of
     Version {} -> putStrLn (showVersion Paths.version)
-    Symbolic {} -> launchSymbolic cmd >>= print
+    Assert {} -> assert cmd
     Exec {} ->
       launchExec cmd
     VmTest {} ->
@@ -327,34 +327,38 @@ regexMatches x y = True
   -- in
   --   Regex.matchTest regex . Seq.fromList . unpack
 
-launchSymbolic :: Command Options.Unwrapped -> IO ()
-launchSymbolic cmd = let sigNature = parseMethodInput (funcSig cmd)
-                         vm1 = EVM.makeVm $ EVM.VMOpts
-                              { EVM.vmoptCode          = hexByteString "--code" (strip0x (code cmd))
-                              , EVM.vmoptCalldata      = []
-                              , EVM.vmoptValue         = 0
-                              , EVM.vmoptAddress       = 0
-                              , EVM.vmoptCaller        = 0
-                              , EVM.vmoptOrigin        = 0
-                              , EVM.vmoptGas           = 0xffffffffff
-                              , EVM.vmoptGaslimit      = 0xffffffffff
-                              , EVM.vmoptCoinbase      = 0
-                              , EVM.vmoptNumber        = 0
-                              , EVM.vmoptTimestamp     = 0
-                              , EVM.vmoptBlockGaslimit = 0
-                              , EVM.vmoptGasprice      = 0
-                              , EVM.vmoptMaxCodeSize   = 0xffffffff
-                              , EVM.vmoptDifficulty    = 0
-                              , EVM.vmoptSchedule      = FeeSchedule.istanbul
-                              , EVM.vmoptCreate        = False
-                              }
-                     in do results <- runSMT $ query $ startWithArgs vm1 sigNature (const sTrue) Nothing
-                           mapM (\x -> case x of
-                                       (EVM.VMFailure (EVM.UnrecognizedOpcode 254)) -> print "Assertion violation for a path!"
-                                       _ -> pure ()
-                                ) results
-                           print "All ending states:"
-                           print results
+assert :: Command Options.Unwrapped -> IO ()
+assert cmd = case parseSignature (funcSig cmd) of
+                       Nothing -> error "could not parse function signature"
+                       Just s ->
+                         let
+                            vm1 = EVM.makeVm $ EVM.VMOpts
+                                 { EVM.vmoptCode          = hexByteString "--code" (strip0x (code cmd))
+                                 , EVM.vmoptCalldata      = []
+                                 , EVM.vmoptValue         = 0
+                                 , EVM.vmoptAddress       = 0
+                                 , EVM.vmoptCaller        = 0
+                                 , EVM.vmoptOrigin        = 0
+                                 , EVM.vmoptGas           = 0xffffffffff
+                                 , EVM.vmoptGaslimit      = 0xffffffffff
+                                 , EVM.vmoptCoinbase      = 0
+                                 , EVM.vmoptNumber        = 0
+                                 , EVM.vmoptTimestamp     = 0
+                                 , EVM.vmoptBlockGaslimit = 0
+                                 , EVM.vmoptGasprice      = 0
+                                 , EVM.vmoptMaxCodeSize   = 0xffffffff
+                                 , EVM.vmoptDifficulty    = 0
+                                 , EVM.vmoptSchedule      = FeeSchedule.istanbul
+                                 , EVM.vmoptCreate        = False
+                                 }
+                            post = Just $ \(input, output) -> case output of
+                              (EVM.VMFailure (EVM.UnrecognizedOpcode 254)) -> sFalse
+                              _ -> sTrue
+                         in do results <- runSMT $ query $ verify vm1 s (const sTrue) post
+                               case results of
+                                 Left () -> print "All good"
+                                 Right a -> do print "Assertion violation:"
+                                               print a
 
 dappCoverage :: UnitTestOptions -> Mode -> String -> IO ()
 dappCoverage opts _ solcFile = do
