@@ -3,6 +3,11 @@ self: super:
 let
   lib = self.pkgs.lib;
   stdenv = self.pkgs.stdenv;
+  nixpkgsold = import (builtins.fetchGit {
+    url = "https://github.com/nixos/nixpkgs";
+    ref = "release-19.03";
+    rev = "f1707d8875276cfa110139435a7e8998b4c2a4fd";
+  }) {};
 
 in rec {
   haskellPackages = super.haskellPackages.override (old: {
@@ -144,7 +149,7 @@ in rec {
 
   # We use this to run private testnets without
   # the pesky transaction size limit.
-  go-ethereum-unlimited = super.go-ethereum.overrideAttrs (geth: rec {
+  go-ethereum-unlimited = nixpkgsold.go-ethereum.overrideAttrs (geth: rec {
     name = "${geth.pname}-unlimited-${geth.version}";
     preConfigure = ''
       # Huge transaction calldata

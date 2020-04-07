@@ -42,8 +42,8 @@ trap clean EXIT
 
 # Go through all the contract ABIs and look for ds-test suites.
 for x in "$DAPP_OUT"/*.abi; do
-  contract=$(sed <<<"$(basename "$x")" s/\.abi$//)
-
+  baseName="$(basename "$x")"
+  contract=${baseName/.abi/}
   # Deploy one instance per test method.
   shutup=0
   while read -r method; do
