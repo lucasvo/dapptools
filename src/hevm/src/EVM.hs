@@ -24,7 +24,6 @@ import EVM.Keccak
 import EVM.Concrete hiding ((^))
 import EVM.Op
 import EVM.FeeSchedule (FeeSchedule (..))
-
 import qualified EVM.Precompiled
 
 import Data.Binary.Get (runGetOrFail)
@@ -222,7 +221,6 @@ data TxState = TxState
   , _substate        :: SubState
   , _isCreate        :: Bool
   , _txReversion     :: Map Addr Contract
-  , _origStorage     :: Map Addr Contract
   }
 
 -- | The "accrued substate" across a transaction
@@ -242,16 +240,33 @@ data ContractCode
   | RuntimeCode ByteString  -- ^ "Instance" code, after contract creation
   deriving (Show, Eq)
 
+-- | A contract can either have concrete or symbolic storage
+-- depending on what type of execution we are doing
+data Storage
+  = Concrete (Map Word Word)
+  | Symbolic (SArray (WordN 256) (WordN 256))
+  deriving (Show)
+
+-- to allow for Eq Contract (which useful for debugging vmtests)
+-- we mock an instance of Eq for symbolic storage.
+-- It should not (cannot) be used though.
+instance Eq Storage where
+  (==) (Concrete a) (Concrete b) = a == b
+  (==) (Symbolic _) (Concrete _) = False
+  (==) (Concrete _) (Symbolic _) = False
+  (==) a b = error "do not compare two symbolic arrays like this!"
+
 -- | The state of a contract
 data Contract = Contract
   { _contractcode :: ContractCode
-  , _storage      :: Map Word Word
+  , _storage      :: Storage
   , _balance      :: Word
   , _nonce        :: Word
   , _codehash     :: W256
   , _opIxMap      :: Vector Int
   , _codeOps      :: RegularVector.Vector (Int, Op)
   , _external     :: Bool
+  , _origStorage  :: Map Word Word
   }
 
 deriving instance Show Contract
@@ -340,8 +355,6 @@ makeVm o = VM
     , _isCreate = vmoptCreate o
     , _txReversion = Map.fromList
       [(vmoptAddress o, initialContract (InitCode (vmoptCode o)))]
-    , _origStorage = Map.fromList
-      [(vmoptAddress o, initialContract (InitCode (vmoptCode o)))]
     }
   , _logs = mempty
   , _traces = Zipper.fromForest []
@@ -386,12 +399,13 @@ initialContract theContractCode = Contract
   , _codehash =
     if BS.null theCode then 0 else
       keccak (stripBytecodeMetadata theCode)
-  , _storage  = mempty
+  , _storage  = Concrete mempty
   , _balance  = 0
   , _nonce    = 0
   , _opIxMap  = mkOpIxMap theCode
   , _codeOps  = mkCodeOps theCode
   , _external = False
+  , _origStorage = mempty
   } where theCode = case theContractCode of
             InitCode b    -> b
             RuntimeCode b -> b
@@ -410,8 +424,12 @@ litWord (C _ a) = literal $ toSizzle a
 maybeLitWord :: SWord 256 -> Maybe Word
 maybeLitWord a = fmap (w256 . fromSizzle) (unliteral a)
 
+-- TODO: wrap these up with the state as well
+-- for more insightful failure mode
 forceLit :: (SWord 256) -> Word
-forceLit = w256 . fromSizzle . fromJust . unliteral
+forceLit a = case unliteral a of
+  Just c -> w256 $ fromSizzle c
+  Nothing -> error "unexpected symbolic argument"
 
 forceLitBytes :: [SWord 8] -> ByteString
 forceLitBytes = BS.pack . fmap (fromSized . fromJust . unliteral)
@@ -835,61 +853,66 @@ exec1 = do
         -- op: SLOAD
         0x54 ->
           case stk of
-            ((forceLit -> x):xs) ->
+            (x:xs) ->
               burn g_sload $
                 accessStorage self x $ \y -> do
                   next
-                  assign (state . stack) (litWord y:xs)
+                  assign (state . stack) (y:xs)
             _ -> underrun
 
         -- op: SSTORE
         0x55 ->
           notStatic $
           case stk of
-            ((forceLit -> x):(forceLit -> new):xs) -> do
+            (x:new:xs) -> do
               accessStorage self x $ \current -> do
                 availableGas <- use (state . gas)
 
                 if availableGas <= g_callstipend
                   then finishFrame (FrameErrored (OutOfGas availableGas g_callstipend))
                   else do
-                    original <- use (tx . origStorage . at self . non
-                             (initialContract (EVM.RuntimeCode mempty))
-                             . storage . at x . non 0)
-
-                    let cost =
-                          if (current == new) then g_sload
-                          else if (current == original) && (original == 0) then g_sset
-                          else if (current == original) then g_sreset
-                          else g_sload
+                    let Just this = view (env.contracts.at self) vm
+                    let original = case view storage this of
+                                      Concrete _ -> fromMaybe 0 (Map.lookup (forceLit x) (view origStorage this))
+                                      Symbolic _ -> 0 -- we don't use this value anywhere anyway
+                    let cost = case mapM maybeLitWord (current:new:[]) of
+                                 -- if any of the arguments are symbolic,
+                                 -- assume worst case scenario
+                                 Nothing -> g_sset
+                                 Just (current':new':[]) -> 
+                                    if (current' == new') then g_sload
+                                    else if (current' == original) && (original == 0) then g_sset
+                                    else if (current' == original) then g_sreset
+                                    else g_sload
 
                     burn cost $ do
                       next
                       assign (state . stack) xs
-                      assign (env . contracts . ix (the state contract) . storage . at x)
-                        (Just new)
+                      modifying (env . contracts . ix (the state contract) . storage)
+                        (writeStorage x new)
+                      case mapM maybeLitWord [current,new] of
+                         -- if any of the arguments are symbolic,
+                         -- don't mess with the refund counter
+                         Nothing -> noop
+                         Just (current':new':[]) ->
+                            if current' == new'
+                            then noop
+                            else if current' == original
+                                 then if original /= 0 && new' == 0
+                                      then refund r_sclear
+                                      else noop
+                                 else do
+                                         if original /= 0
+                                         then if new' == 0
+                                              then refund r_sclear
+                                              else unRefund r_sclear
+                                         else noop
 
-                      case (current == new) of
-                        True  -> noop
-                        False -> case (current == original) of
-
-                            True -> do if (original /= 0) && (new == 0)
-                                           then refund r_sclear
-                                           else noop
-
-                            False -> do if (original /= 0)
-                                            then
-                                              if (new == 0)
-                                                 then refund r_sclear
-                                                 else unRefund r_sclear
-                                            else noop
-
-                                        if (original == new)
-                                           then
-                                             if (original == 0)
-                                                then refund (g_sset - g_sload)
-                                                else refund (g_sreset - g_sload)
-                                           else noop
+                                         if original == new'
+                                         then if original == 0
+                                              then refund (g_sset - g_sload)
+                                              else refund (g_sreset - g_sload)
+                                         else noop
 
             _ -> underrun
 
@@ -1427,29 +1450,38 @@ fetchAccount addr continue = do
         then vmError . NoSuchContract $ addr
         else continue c
 
+readStorage :: Storage -> SWord 256 -> Maybe (SWord 256)
+readStorage (Symbolic s) loc = Just $ readArray s loc
+readStorage (Concrete s) loc = do v <- Map.lookup (forceLit loc) s
+                                  return $ litWord v
+
+writeStorage :: SWord 256 -> SWord 256 -> Storage -> Storage
+writeStorage loc val (Symbolic s) = Symbolic (writeArray s loc val)
+writeStorage loc val (Concrete s) = Concrete (Map.insert (forceLit loc) (forceLit val) s)
+
 accessStorage
-  :: Addr             -- ^ Contract address
-  -> Word             -- ^ Storage slot key
-  -> (Word -> EVM ()) -- ^ Continuation
+  :: Addr                  -- ^ Contract address
+  -> SWord 256             -- ^ Storage slot key
+  -> (SWord 256 -> EVM ()) -- ^ Continuation
   -> EVM ()
 accessStorage addr slot continue =
   use (env . contracts . at addr) >>= \case
     Just c ->
-      case view (storage . at slot) c of
+      case readStorage (view storage c) slot of
         Just x ->
           continue x
         Nothing ->
           if view external c
           then
             assign result . Just . VMFailure . Query $
-              PleaseFetchSlot addr slot
-                (\x -> do
-                    assign (cache . fetched . ix addr . storage . at slot) (Just x)
-                    assign (env . contracts . ix addr . storage . at slot) (Just x)
+              PleaseFetchSlot addr (forceLit slot)
+                (\(litWord -> x) -> do
+                    modifying (cache . fetched . ix addr . storage) (writeStorage slot x)
+                    modifying (env . contracts . ix addr . storage) (writeStorage slot x)
                     assign result Nothing
                     continue x)
           else do
-            assign (env . contracts . ix addr . storage . at slot) (Just 0)
+            modifying (env . contracts . ix addr . storage) (writeStorage slot 0)
             continue 0
     Nothing ->
       fetchAccount addr $ \_ ->
@@ -1773,8 +1805,6 @@ create self this xGas xValue xs newAddr initCode = do
                             , creationContextSubstate = view (tx . substate) vm0
                             }
 
-        --reset origStorage if account already existed
-        assign (tx . origStorage . at newAddr . lifted) newContract
         zoom (env . contracts) $ do
           oldAcc <- use (at newAddr)
           let oldBal = case oldAcc of

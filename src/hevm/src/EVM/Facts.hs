@@ -34,7 +34,7 @@ module EVM.Facts
   , fileToFact
   ) where
 
-import EVM          (VM, Contract)
+import EVM          (VM, Contract, litWord)
 import EVM.Concrete (Word)
 import EVM          (balance, nonce, storage, bytecode, env, contracts)
 import EVM.Types    (Addr)
@@ -43,7 +43,7 @@ import qualified EVM as EVM
 
 import Prelude hiding (Word)
 
-import Control.Lens    (view, set, at, ix, (&))
+import Control.Lens    (view, set, at, ix, (&), over)
 import Data.ByteString (ByteString)
 import Data.Monoid     ((<>))
 import Data.Ord        (comparing)
@@ -117,7 +117,9 @@ contractFacts a x = storageFacts a x ++
   ]
 
 storageFacts :: Addr -> Contract -> [Fact]
-storageFacts a x = map f (Map.toList (view storage x))
+storageFacts a x = case view storage x of
+  EVM.Symbolic _ -> []
+  EVM.Concrete s -> map f (Map.toList s)
   where
     f :: (Word, Word) -> Fact
     f (k, v) = StorageFact
@@ -144,7 +146,7 @@ apply1 vm fact =
     CodeFact    {..} ->
       vm & set (env . contracts . at addr) (Just (EVM.initialContract (EVM.RuntimeCode blob)))
     StorageFact {..} ->
-      vm & set (env . contracts . ix addr . storage . at which) (Just what)
+      vm & over (env . contracts . ix addr . storage) (EVM.writeStorage (litWord which) (litWord what))
     BalanceFact {..} ->
       vm & set (env . contracts . ix addr . balance) what
     NonceFact   {..} ->
