@@ -145,11 +145,11 @@ type EVM a = State VM a
 -- any expensive query that is constant at least within a block.
 data Cache = Cache
   { _fetched :: Map Addr Contract
-  }
+  } deriving Show
 
 -- | A way to specify an initial VM state
 data VMOpts = VMOpts
-  { vmoptCode :: ByteString
+  { vmoptContract :: Contract
   , vmoptCalldata :: [SWord 8]
   , vmoptValue :: W256
   , vmoptAddress :: Addr
@@ -354,7 +354,7 @@ makeVm o = VM
     , _substate = SubState mempty mempty mempty
     , _isCreate = vmoptCreate o
     , _txReversion = Map.fromList
-      [(vmoptAddress o, initialContract (InitCode (vmoptCode o)))]
+      [(vmoptAddress o, vmoptContract o)]
     }
   , _logs = mempty
   , _traces = Zipper.fromForest []
@@ -372,7 +372,7 @@ makeVm o = VM
     , _stack = mempty
     , _memory = mempty
     , _memorySize = 0
-    , _code = vmoptCode o
+    , _code = theCode
     , _contract = vmoptAddress o
     , _codeContract = vmoptAddress o
     , _calldata = vmoptCalldata o
@@ -386,12 +386,15 @@ makeVm o = VM
     { _sha3Crack = mempty
     , _chainId = 1
     , _contracts = Map.fromList
-      [(vmoptAddress o, initialContract (InitCode (vmoptCode o)))]
+      [(vmoptAddress o, vmoptContract o)]
     }
-  , _cache = mempty
+  , _cache = Cache $ Map.fromList
+    [(vmoptAddress o, vmoptContract o)]
   , _execMode = ExecuteNormally
   , _burned = 0
-  }
+  } where theCode = case _contractcode (vmoptContract o) of
+            InitCode b    -> b
+            RuntimeCode b -> b
 
 initialContract :: ContractCode -> Contract
 initialContract theContractCode = Contract
@@ -1466,26 +1469,33 @@ accessStorage
   -> EVM ()
 accessStorage addr slot continue =
   use (env . contracts . at addr) >>= \case
-    Just c ->
-      case readStorage (view storage c) slot of
+    Just c -> case readStorage (_storage c) slot of
         Just x ->
           continue x
         Nothing ->
           if view external c
           then
-            assign result . Just . VMFailure . Query $
-              PleaseFetchSlot addr (forceLit slot)
-                (\(litWord -> x) -> do
-                    modifying (cache . fetched . ix addr . storage) (writeStorage slot x)
-                    modifying (env . contracts . ix addr . storage) (writeStorage slot x)
-                    assign result Nothing
-                    continue x)
+            -- check if the slot is cached
+            use (cache . fetched . at addr) >>= \case
+              Nothing -> mkQuery
+              Just cachedContract ->
+                case readStorage (_storage cachedContract) slot of
+                  Nothing -> mkQuery
+                  Just x -> continue x
           else do
             modifying (env . contracts . ix addr . storage) (writeStorage slot 0)
             continue 0
     Nothing ->
       fetchAccount addr $ \_ ->
         accessStorage addr slot continue
+  where
+      mkQuery = assign result . Just . VMFailure . Query $
+                  PleaseFetchSlot addr (forceLit slot)
+                    (\(litWord -> x) -> do
+                        modifying (cache . fetched . ix addr . storage) (writeStorage slot x)
+                        modifying (env . contracts . ix addr . storage) (writeStorage slot x)
+                        assign result Nothing
+                        continue x)
 
 accountExists :: Addr -> VM -> Bool
 accountExists addr vm =

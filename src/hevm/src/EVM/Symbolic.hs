@@ -53,7 +53,7 @@ mkSymbolicContract theContractCode store = Contract
 loadSymVM :: ByteString -> SArray (WordN 256) (WordN 256) -> [SWord 8] -> VM
 loadSymVM x initStore calldata =
     (makeVm $ VMOpts
-    { vmoptCode = x
+    { vmoptContract = mkSymbolicContract (RuntimeCode x) initStore
     , vmoptCalldata = calldata
     , vmoptValue = 0
     , vmoptAddress = createAddress ethrunAddress 1
