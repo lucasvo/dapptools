@@ -118,7 +118,10 @@ data AbiType
   | AbiArrayDynamicType AbiType
   | AbiArrayType        Int AbiType
   | AbiTupleType        (Vector AbiType)
-  deriving (Show, Read, Eq, Ord, Generic)
+  deriving (Read, Eq, Ord, Generic)
+
+instance Show AbiType where
+  show = Text.unpack . abiTypeSolidity
 
 data AbiKind = Dynamic | Static
   deriving (Show, Read, Eq, Ord, Generic)

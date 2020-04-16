@@ -59,7 +59,7 @@ import Data.ByteString            (ByteString)
 import Data.List                  (intercalate, isSuffixOf)
 import Data.Text                  (Text, unpack, pack)
 import Data.Text.Encoding         (encodeUtf8)
-import Data.Maybe                 (fromMaybe)
+import Data.Maybe                 (fromMaybe, fromJust)
 import Data.Version               (showVersion)
 import Data.SBV hiding (Word, verbose)
 import Data.SBV.Control hiding (Word, verbose, Version, timeout, create)
@@ -168,7 +168,7 @@ data Command w
   { file :: w ::: String <?> "Path to .json test file"
   }
   | StripMetadata -- Remove metadata from contract bytecode
-  { code        :: w ::: ByteString       <?> "Program bytecode"
+  { code        :: w ::: Maybe ByteString       <?> "Program bytecode"
   }
 
   deriving (Options.Generic)
@@ -273,7 +273,7 @@ main = do
         Just c -> putStrLn $ show c
     MerkleTest {} -> merkleTest cmd
     StripMetadata {} -> print .
-      ByteStringS . stripBytecodeMetadata . hexByteString "bytecode" . strip0x $ code cmd
+      ByteStringS . stripBytecodeMetadata . hexByteString "bytecode" . strip0x . fromJust $ code cmd
 
 launchScript :: String -> Command Options.Unwrapped -> IO ()
 launchScript script cmd = do
